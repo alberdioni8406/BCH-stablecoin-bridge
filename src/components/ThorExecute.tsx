@@ -1,9 +1,8 @@
 "use client";
 
 /**
- * THORChain EVM leg execution panel.
- * User reviews inbound/router/memo/expiry, approves USDT, then depositWithExpiry.
- * Does not auto-start Cauldron leg 2.
+ * THORChain EVM leg-1 execution panel.
+ * Prepare → Approve USDT → depositWithExpiry. No Cauldron auto-start.
  */
 
 import { useState, useCallback } from "react";
@@ -16,8 +15,8 @@ import {
 } from "wagmi";
 import { mainnet, bsc } from "wagmi/chains";
 import {
-  ERC20_ABI,
-  THOR_ROUTER_ABI,
+  erc20Abi,
+  thorRouterAbi,
   USDT_ETH,
   USDT_BSC,
 } from "@/lib/wagmi/config";
@@ -34,32 +33,26 @@ import clsx from "clsx";
 
 interface ThorPrep {
   inboundAddress: string;
-  router: string | null;
+  router: string;
   memo: string;
   expiry: number;
   amountNative: string;
-  humanAmount: string;
   expectedAmountOut: string;
-  notes: string;
   depositArgs: {
     inboundAddress: string;
     asset: string;
     amount: string;
     memo: string;
     expiry: number;
-  } | null;
+  };
 }
 
 interface Props {
   fromAsset: AssetId;
-  /** Intermediate destination is always BCH for multi-leg */
   toAsset: AssetId;
   amount: string;
-  /** User's BCH address for THOR outbound */
   bchDestination: string;
   onBchDestinationChange: (v: string) => void;
-  /** Optional: notify parent of transfer id */
-  onTransferCreated?: (id: string) => void;
 }
 
 export function ThorExecute({
@@ -68,7 +61,6 @@ export function ThorExecute({
   amount,
   bchDestination,
   onBchDestinationChange,
-  onTransferCreated,
 }: Props) {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -79,31 +71,25 @@ export function ThorExecute({
     "idle" | "prepared" | "approving" | "depositing" | "done"
   >("idle");
   const [transferId, setTransferId] = useState<string | null>(null);
+  const [localTxHash, setLocalTxHash] = useState<`0x${string}` | undefined>();
 
   const fromMeta = getAsset(fromAsset);
-  const preferredChain =
-    fromMeta.network === "bsc" ? bsc.id : mainnet.id;
-  const tokenAddress =
-    fromMeta.network === "bsc" ? USDT_BSC : USDT_ETH;
+  const preferredChain = fromMeta.network === "bsc" ? bsc.id : mainnet.id;
+  const tokenAddress = fromMeta.network === "bsc" ? USDT_BSC : USDT_ETH;
 
-  const routerAddress = (prep?.router ?? undefined) as
-    | `0x${string}`
-    | undefined;
+  const routerAddr = prep?.router as `0x${string}` | undefined;
 
   const { data: allowance } = useReadContract({
     address: tokenAddress,
-    abi: ERC20_ABI,
+    abi: erc20Abi,
     functionName: "allowance",
-    args:
-      address && routerAddress
-        ? [address, routerAddress]
-        : undefined,
-    query: { enabled: Boolean(address && routerAddress && prep) },
+    args: address && routerAddr ? [address, routerAddr] : undefined,
+    query: { enabled: Boolean(address && routerAddr) },
   });
 
   const { data: balance } = useReadContract({
     address: tokenAddress,
-    abi: ERC20_ABI,
+    abi: erc20Abi,
     functionName: "balanceOf",
     args: address ? [address] : undefined,
     query: { enabled: Boolean(address) },
@@ -111,56 +97,81 @@ export function ThorExecute({
 
   const {
     writeContractAsync,
-    data: txHash,
     error: writeError,
     isPending: isWriting,
     reset: resetWrite,
   } = useWriteContract();
 
   const { isLoading: isConfirming, isSuccess: isConfirmed } =
-    useWaitForTransactionReceipt({ hash: txHash });
+    useWaitForTransactionReceipt({ hash: localTxHash });
 
   const needsApprove =
-    prep &&
+    prep != null &&
     allowance !== undefined &&
-    BigInt(prep.amountNative) > (allowance as bigint);
+    BigInt(prep.amountNative) > BigInt(allowance as bigint);
+
+  const amountOk =
+    balance !== undefined &&
+    prep != null &&
+    BigInt(balance as bigint) >= BigInt(prep.amountNative);
 
   const prepare = useCallback(async () => {
     setPreparing(true);
     setPrepError(null);
     setPrep(null);
     setStep("idle");
+    setLocalTxHash(undefined);
     resetWrite();
     try {
       if (!bchDestination || bchDestination.length < 15) {
-        throw new Error(
-          "Enter your BCH destination address (bitcoincash:… or legacy)."
-        );
+        throw new Error("Enter your BCH destination address (bitcoincash:…).");
       }
-      // THOR outbound for multi-leg first leg is always BCH
-      const thorTo: AssetId =
-        toAsset === "bch-native" ? "bch-native" : "bch-native";
-
       const res = await fetch("/api/thor/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           from: fromAsset,
-          to: thorTo,
+          to: "bch-native",
           amount,
           destination: bchDestination,
         }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as {
+        error?: string;
+        preparation?: {
+          inboundAddress?: string;
+          router?: string | null;
+          memo?: string;
+          expiry?: number;
+          amountNative?: string;
+          expectedAmountOut?: string;
+          depositArgs?: ThorPrep["depositArgs"] | null;
+        };
+      };
       if (!res.ok) throw new Error(data.error || "Prepare failed");
-      const p = data.preparation as ThorPrep;
-      if (!p?.inboundAddress || !p.router) {
+      const p = data.preparation;
+      if (
+        !p?.inboundAddress ||
+        !p.router ||
+        !p.depositArgs ||
+        !p.memo ||
+        !p.amountNative
+      ) {
         throw new Error("Incomplete THOR preparation response");
       }
-      if (p.expiry < Math.floor(Date.now() / 1000)) {
+      if ((p.expiry ?? 0) < Math.floor(Date.now() / 1000)) {
         throw new Error("Quote already expired — prepare again");
       }
-      setPrep(p);
+      const normalized: ThorPrep = {
+        inboundAddress: p.inboundAddress,
+        router: p.router,
+        memo: p.memo,
+        expiry: p.expiry ?? Math.floor(Date.now() / 1000) + 600,
+        amountNative: p.amountNative,
+        expectedAmountOut: p.expectedAmountOut ?? "0",
+        depositArgs: p.depositArgs,
+      };
+      setPrep(normalized);
       setStep("prepared");
 
       const id = createTransferId();
@@ -181,59 +192,50 @@ export function ThorExecute({
             to: "bch-native",
             status: "pending",
           },
-          ...(toAsset !== "bch-native"
-            ? [
-                {
-                  index: 1 as const,
-                  provider: "cauldron" as const,
-                  from: "bch-native" as AssetId,
-                  to: toAsset,
-                  status: "pending" as const,
-                },
-              ]
-            : []),
         ],
         intermediateAsset: "bch-native",
       };
+      if (toAsset !== "bch-native") {
+        rec.legs.push({
+          index: 1,
+          provider: "cauldron",
+          from: "bch-native",
+          to: toAsset,
+          status: "pending",
+        });
+      }
       saveTransfer(rec);
       setTransferId(id);
-      onTransferCreated?.(id);
     } catch (e) {
       setPrepError(e instanceof Error ? e.message : String(e));
     } finally {
       setPreparing(false);
     }
-  }, [
-    amount,
-    bchDestination,
-    fromAsset,
-    toAsset,
-    onTransferCreated,
-    resetWrite,
-  ]);
+  }, [amount, bchDestination, fromAsset, toAsset, resetWrite]);
 
   const runApprove = async () => {
-    if (!prep?.router || !address) return;
+    if (!prep || !address) return;
     setStep("approving");
     try {
       await writeContractAsync({
         address: tokenAddress,
-        abi: ERC20_ABI,
+        abi: erc20Abi,
         functionName: "approve",
         args: [prep.router as `0x${string}`, BigInt(prep.amountNative)],
       });
+      setStep("prepared");
     } catch {
       setStep("prepared");
     }
   };
 
   const runDeposit = async () => {
-    if (!prep?.depositArgs || !prep.router) return;
+    if (!prep) return;
     setStep("depositing");
     try {
       const hash = await writeContractAsync({
         address: prep.router as `0x${string}`,
-        abi: THOR_ROUTER_ABI,
+        abi: thorRouterAbi,
         functionName: "depositWithExpiry",
         args: [
           prep.depositArgs.inboundAddress as `0x${string}`,
@@ -243,7 +245,8 @@ export function ThorExecute({
           BigInt(prep.depositArgs.expiry),
         ],
       });
-      if (transferId && hash) {
+      setLocalTxHash(hash);
+      if (transferId) {
         const rec: TransferRecord = {
           id: transferId,
           createdAt: Date.now(),
@@ -274,10 +277,6 @@ export function ThorExecute({
   };
 
   const wrongChain = isConnected && chainId !== preferredChain;
-  const amountOk =
-    balance !== undefined &&
-    prep &&
-    (balance as bigint) >= BigInt(prep.amountNative);
 
   return (
     <div className="mt-6 rounded-xl border border-surface-border bg-surface-raised p-4 space-y-4">
@@ -291,14 +290,11 @@ export function ThorExecute({
       <p className="text-[11px] text-gray-500">
         Non-custodial. You approve and sign in your own wallet. Leg 2 (BCH →
         PUSD/MUSD) is <strong className="text-gray-400">not</strong> started
-        automatically — verify BCH arrival, then swap on Cauldron with a
-        CashTokens wallet.
+        automatically.
       </p>
 
       <div>
-        <label className="text-xs text-gray-500">
-          Your BCH destination address (THOR outbound)
-        </label>
+        <label className="text-xs text-gray-500">Your BCH destination address</label>
         <input
           type="text"
           value={bchDestination}
@@ -316,8 +312,7 @@ export function ThorExecute({
       >
         {preparing ? (
           <>
-            <Loader2 size={16} className="animate-spin" /> Preparing THOR
-            params…
+            <Loader2 size={16} className="animate-spin" /> Preparing…
           </>
         ) : (
           "Prepare fresh THOR deposit"
@@ -334,26 +329,16 @@ export function ThorExecute({
       {prep && (
         <div className="text-xs space-y-2 font-mono bg-surface-overlay rounded-lg p-3 border border-surface-border">
           <Row label="Inbound" value={prep.inboundAddress} />
-          <Row label="Router" value={prep.router ?? "—"} />
+          <Row label="Router" value={prep.router} />
           <Row label="Amount (native)" value={prep.amountNative} />
           <Row label="Memo" value={prep.memo} />
+          <Row label="Expiry" value={new Date(prep.expiry * 1000).toLocaleString()} />
           <Row
-            label="Expiry"
-            value={new Date(prep.expiry * 1000).toLocaleString()}
-          />
-          <Row
-            label="Expected BCH out (est.)"
-            value={
-              // THOR 1e8 → human
-              (Number(prep.expectedAmountOut) / 1e8).toFixed(8)
-            }
+            label="Expected BCH (est.)"
+            value={(Number(prep.expectedAmountOut) / 1e8).toFixed(8)}
           />
           {balance !== undefined && (
-            <Row
-              label="Your USDT balance (raw)"
-              value={String(balance)}
-              warn={!amountOk}
-            />
+            <Row label="USDT balance (raw)" value={String(balance)} warn={!amountOk} />
           )}
           {allowance !== undefined && (
             <Row
@@ -403,12 +388,10 @@ export function ThorExecute({
       )}
 
       {writeError && (
-        <p className="text-xs text-amber-400">
-          {writeError.message.slice(0, 200)}
-        </p>
+        <p className="text-xs text-amber-400">{writeError.message.slice(0, 240)}</p>
       )}
 
-      {(txHash || isConfirmed) && (
+      {(localTxHash || isConfirmed) && (
         <div
           className={clsx(
             "text-sm rounded-lg p-3 border flex gap-2",
@@ -417,32 +400,34 @@ export function ThorExecute({
               : "bg-surface-overlay border-surface-border text-gray-300"
           )}
         >
-          {isConfirmed ? <CheckCircle2 size={16} /> : <Loader2 size={16} className="animate-spin" />}
+          {isConfirmed ? (
+            <CheckCircle2 size={16} />
+          ) : (
+            <Loader2 size={16} className="animate-spin" />
+          )}
           <div>
             <p>
               {isConfirmed
                 ? "Source tx confirmed on EVM."
                 : "Source tx submitted…"}
             </p>
-            {txHash && (
+            {localTxHash && (
               <a
                 href={
                   preferredChain === bsc.id
-                    ? `https://bscscan.com/tx/${txHash}`
-                    : `https://etherscan.io/tx/${txHash}`
+                    ? `https://bscscan.com/tx/${localTxHash}`
+                    : `https://etherscan.io/tx/${localTxHash}`
                 }
                 target="_blank"
                 rel="noreferrer"
                 className="font-mono text-xs underline"
               >
-                {txHash.slice(0, 14)}…
+                {localTxHash.slice(0, 14)}…
               </a>
             )}
             <p className="text-[11px] text-gray-400 mt-1">
-              Wait for THORChain to observe and send BCH to{" "}
-              <span className="font-mono">{bchDestination.slice(0, 18)}…</span>.
-              Then open the Tracker and mark BCH received. Leg 2 requires a
-              CashTokens BCH wallet (not connected here).
+              Wait for THORChain to send BCH to your address, then use Tracker /
+              a CashTokens wallet for leg 2.
             </p>
           </div>
         </div>
