@@ -12,6 +12,26 @@
 import type { AssetId, NormalizedQuote } from "@/lib/types";
 import { getAsset, fromRawAmount } from "@/lib/assets/registry";
 
+
+/** Parse indexer reserve fields as BigInt without float precision loss. */
+export function toReserveBigInt(value: unknown): bigint {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) return 0n;
+    // Safe only under MAX_SAFE_INTEGER; still prefer string path from API
+    if (value > Number.MAX_SAFE_INTEGER) {
+      throw new Error("Reserve exceeds JS safe integer — expected string from indexer");
+    }
+    return BigInt(Math.trunc(value));
+  }
+  if (typeof value === "string") {
+    const cleaned = value.trim().split(".")[0]?.replace(/[^0-9-]/g, "") || "0";
+    if (!cleaned || cleaned === "-") return 0n;
+    return BigInt(cleaned);
+  }
+  return 0n;
+}
+
 const INDEXER =
   process.env.CAULDRON_INDEXER_URL || "https://indexer.riften.net/cauldron";
 
@@ -61,8 +81,8 @@ export function aggregateReserves(pools: CauldronPool[]): {
   let totalSats = BigInt(0);
   let totalTokens = BigInt(0);
   for (const p of pools) {
-    totalSats += BigInt(Math.floor(p.sats));
-    totalTokens += BigInt(Math.floor(p.tokens));
+    totalSats += toReserveBigInt(p.sats);
+    totalTokens += toReserveBigInt(p.tokens);
   }
   return { totalSats, totalTokens, poolCount: pools.length };
 }
@@ -117,8 +137,8 @@ export function quoteBestPool(
   const candidates: PoolQuoteResult[] = [];
 
   for (const p of pools) {
-    const sats = BigInt(Math.floor(p.sats));
-    const tokens = BigInt(Math.floor(p.tokens));
+    const sats = toReserveBigInt(p.sats);
+    const tokens = toReserveBigInt(p.tokens);
     if (sats <= 0n || tokens <= 0n) continue;
 
     let reserveIn: bigint;
