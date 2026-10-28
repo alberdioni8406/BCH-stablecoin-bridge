@@ -11,130 +11,104 @@ import type { CreateConnectorFn } from "wagmi";
 type EthereumProvider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
 };
-
 function createInjectedConnector(): CreateConnectorFn {
-  // Cast: wagmi's connect() generic withCapabilities is stricter than we need for injected-only
-  return createConnector((config) => ({
-    id: "injected",
-    name: "Injected",
-    type: "injected" as const,
-    async setup() {},
-    async connect(parameters: {
-      chainId?: number;
-      isReconnecting?: boolean;
-      withCapabilities?: boolean;
-    } = {}) {
-      const provider = await this.getProvider();
-      if (!provider) {
-        throw new Error("No injected wallet found (install MetaMask or Rabby)");
-      }
-      const accounts = (await provider.request({
-        method: "eth_requestAccounts",
-      })) as `0x${string}`[];
-      let currentChainId = await this.getChainId();
-      if (parameters.chainId && currentChainId !== parameters.chainId) {
+  return createConnector((config) => {
+    const connector = {
+      id: "injected",
+      name: "Injected",
+      type: "injected" as const,
+      async setup() {},
+      async connect({ chainId }: { chainId?: number } = {}) {
+        const provider = await connector.getProvider();
+        if (!provider) throw new Error("No injected wallet found (install MetaMask or Rabby)");
+        const accounts = (await provider.request({
+          method: "eth_requestAccounts",
+        })) as `0x${string}`[];
+        let currentChainId = await connector.getChainId();
+        if (chainId && currentChainId !== chainId) {
+          try {
+            await connector.switchChain?.({ chainId });
+            currentChainId = chainId;
+          } catch {
+            /* ignore */
+          }
+        }
+        return { accounts, chainId: currentChainId };
+      },
+      async disconnect() {},
+      async getAccounts() {
+        const provider = await connector.getProvider();
+        if (!provider) return [] as `0x${string}`[];
+        return (await provider.request({
+          method: "eth_accounts",
+        })) as `0x${string}`[];
+      },
+      async getChainId() {
+        const provider = await connector.getProvider();
+        if (!provider) return mainnet.id;
+        const hex = (await provider.request({ method: "eth_chainId" })) as string;
+        return Number.parseInt(hex, 16);
+      },
+      async getProvider() {
+        if (typeof window === "undefined") return undefined;
+        return (window as unknown as { ethereum?: EthereumProvider }).ethereum;
+      },
+      async isAuthorized() {
         try {
-          await this.switchChain?.({ chainId: parameters.chainId });
-          currentChainId = parameters.chainId;
+          return (await connector.getAccounts()).length > 0;
         } catch {
-          // user rejected switch
+          return false;
         }
-      }
-      if (parameters.withCapabilities) {
-        return {
-          accounts: accounts.map((address) => ({
-            address,
-            capabilities: {},
-          })),
-          chainId: currentChainId,
-        };
-      }
-      return {
-        accounts,
-        chainId: currentChainId,
-      };
-    },
-    async disconnect() {},
-    async getAccounts() {
-      const provider = await this.getProvider();
-      if (!provider) return [] as const;
-      const accounts = (await provider.request({
-        method: "eth_accounts",
-      })) as `0x${string}`[];
-      return accounts;
-    },
-    async getChainId() {
-      const provider = await this.getProvider();
-      if (!provider) return mainnet.id;
-      const hex = (await provider.request({ method: "eth_chainId" })) as string;
-      return Number.parseInt(hex, 16);
-    },
-    async getProvider() {
-      if (typeof window === "undefined") return undefined;
-      return (window as unknown as { ethereum?: EthereumProvider }).ethereum;
-    },
-    async isAuthorized() {
-      try {
-        const accounts = await this.getAccounts();
-        return accounts.length > 0;
-      } catch {
-        return false;
-      }
-    },
-    async switchChain({ chainId }: { chainId: number }) {
-      const provider = await this.getProvider();
-      if (!provider) throw new Error("No provider");
-      const hex = `0x\( {chainId.toString(16)}` as `0x \){string}`;
-      try {
-        await provider.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: hex }],
-        });
-      } catch (e: unknown) {
-        const err = e as { code?: number };
-        if (err?.code === 4902) {
-          const chain = config.chains.find((c) => c.id === chainId);
-          if (!chain) throw e;
+      },
+      async switchChain({ chainId }: { chainId: number }) {
+        const provider = await connector.getProvider();
+        if (!provider) throw new Error("No provider");
+        const hex = `0x${chainId.toString(16)}`;
+        try {
           await provider.request({
-            method: "wallet_addEthereumChain",
-            params: [
-              {
-                chainId: hex,
-                chainName: chain.name,
-                nativeCurrency: chain.nativeCurrency,
-                rpcUrls: chain.rpcUrls.default.http,
-                blockExplorerUrls: chain.blockExplorers
-                  ? [chain.blockExplorers.default.url]
-                  : undefined,
-              },
-            ],
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: hex }],
           });
-        } else {
-          throw e;
+        } catch (e: unknown) {
+          const err = e as { code?: number };
+          if (err?.code === 4902) {
+            const chain = config.chains.find((c) => c.id === chainId);
+            if (!chain) throw e;
+            await provider.request({
+              method: "wallet_addEthereumChain",
+              params: [
+                {
+                  chainId: hex,
+                  chainName: chain.name,
+                  nativeCurrency: chain.nativeCurrency,
+                  rpcUrls: chain.rpcUrls.default.http,
+                  blockExplorerUrls: chain.blockExplorers
+                    ? [chain.blockExplorers.default.url]
+                    : undefined,
+                },
+              ],
+            });
+          } else throw e;
         }
-      }
-      return config.chains.find((c) => c.id === chainId) ?? mainnet;
-    },
-    onAccountsChanged(accounts: string[]) {
-      if (accounts.length === 0) {
+        return config.chains.find((c) => c.id === chainId) ?? mainnet;
+      },
+      onAccountsChanged(accounts: string[]) {
+        if (accounts.length === 0) config.emitter.emit("disconnect");
+        else
+          config.emitter.emit("change", {
+            accounts: accounts as readonly `0x${string}`[],
+          });
+      },
+      onChainChanged(chain: string) {
+        config.emitter.emit("change", { chainId: Number.parseInt(chain, 16) });
+      },
+      onDisconnect() {
         config.emitter.emit("disconnect");
-      } else {
-        config.emitter.emit("change", {
-          accounts: accounts as readonly `0x${string}`[],
-        });
-      }
-    },
-    onChainChanged(chain: string) {
-      config.emitter.emit("change", {
-        chainId: Number.parseInt(chain, 16),
-      });
-    },
-    onDisconnect() {
-      config.emitter.emit("disconnect");
-    },
-  })) as CreateConnectorFn;
+      },
+    };
+    return connector as never;
+  }) as CreateConnectorFn;
 }
-
 export const wagmiConfig = createConfig({
   chains: [mainnet, bsc],
   connectors: [createInjectedConnector()],
