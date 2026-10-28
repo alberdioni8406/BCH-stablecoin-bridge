@@ -13,41 +13,55 @@ type EthereumProvider = {
 };
 
 function createInjectedConnector(): CreateConnectorFn {
+  // Cast: wagmi's connect() generic withCapabilities is stricter than we need for injected-only
   return createConnector((config) => ({
     id: "injected",
     name: "Injected",
     type: "injected" as const,
     async setup() {},
-    async connect({ chainId } = {}) {
+    async connect(parameters: {
+      chainId?: number;
+      isReconnecting?: boolean;
+      withCapabilities?: boolean;
+    } = {}) {
       const provider = await this.getProvider();
       if (!provider) {
         throw new Error("No injected wallet found (install MetaMask or Rabby)");
       }
       const accounts = (await provider.request({
         method: "eth_requestAccounts",
-      })) as string[];
+      })) as `0x${string}`[];
       let currentChainId = await this.getChainId();
-      if (chainId && currentChainId !== chainId) {
+      if (parameters.chainId && currentChainId !== parameters.chainId) {
         try {
-          await this.switchChain?.({ chainId });
-          currentChainId = chainId;
+          await this.switchChain?.({ chainId: parameters.chainId });
+          currentChainId = parameters.chainId;
         } catch {
           // user rejected switch
         }
       }
+      if (parameters.withCapabilities) {
+        return {
+          accounts: accounts.map((address) => ({
+            address,
+            capabilities: {},
+          })),
+          chainId: currentChainId,
+        };
+      }
       return {
-        accounts: accounts as readonly `0x${string}`[],
+        accounts,
         chainId: currentChainId,
       };
     },
     async disconnect() {},
     async getAccounts() {
       const provider = await this.getProvider();
-      if (!provider) return [];
+      if (!provider) return [] as const;
       const accounts = (await provider.request({
         method: "eth_accounts",
-      })) as string[];
-      return accounts as readonly `0x${string}`[];
+      })) as `0x${string}`[];
+      return accounts;
     },
     async getChainId() {
       const provider = await this.getProvider();
@@ -67,7 +81,7 @@ function createInjectedConnector(): CreateConnectorFn {
         return false;
       }
     },
-    async switchChain({ chainId }) {
+    async switchChain({ chainId }: { chainId: number }) {
       const provider = await this.getProvider();
       if (!provider) throw new Error("No provider");
       const hex = `0x\( {chainId.toString(16)}` as `0x \){string}`;
@@ -101,7 +115,7 @@ function createInjectedConnector(): CreateConnectorFn {
       }
       return config.chains.find((c) => c.id === chainId) ?? mainnet;
     },
-    onAccountsChanged(accounts) {
+    onAccountsChanged(accounts: string[]) {
       if (accounts.length === 0) {
         config.emitter.emit("disconnect");
       } else {
@@ -110,7 +124,7 @@ function createInjectedConnector(): CreateConnectorFn {
         });
       }
     },
-    onChainChanged(chain) {
+    onChainChanged(chain: string) {
       config.emitter.emit("change", {
         chainId: Number.parseInt(chain, 16),
       });
@@ -118,7 +132,7 @@ function createInjectedConnector(): CreateConnectorFn {
     onDisconnect() {
       config.emitter.emit("disconnect");
     },
-  }));
+  })) as CreateConnectorFn;
 }
 
 export const wagmiConfig = createConfig({
