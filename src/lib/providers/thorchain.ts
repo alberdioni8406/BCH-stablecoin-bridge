@@ -24,24 +24,33 @@ export function toThorAsset(id: AssetId): string | null {
 }
 
 /**
- * THORChain uses 1e8 for all quote amounts regardless of native decimals.
- * Convert human amount → 1e8 units for the quote API.
+ * THORChain quote API uses 1e8 units for all assets regardless of native decimals.
+ * Convert human decimal string → 1e8 integer string via integer arithmetic.
  */
-function toThorAmount(human: string, assetDecimals: number): string {
-  // Parse human to float carefully then scale to 1e8
-  const num = Number(human);
-  if (!Number.isFinite(num) || num <= 0) throw new Error("Invalid amount");
-  // 1e8 representation
-  const thorUnits = Math.floor(num * 1e8);
-  return String(thorUnits);
+export function toThorAmount(human: string, _assetDecimals?: number): string {
+  const cleaned = human.trim();
+  if (!cleaned || cleaned === ".") throw new Error("Invalid amount");
+  const [intPart, fracPart = ""] = cleaned.split(".");
+  if (!/^\d*$/.test(intPart) || !/^\d*$/.test(fracPart)) {
+    throw new Error("Invalid amount characters");
+  }
+  // Scale to 1e8: take up to 8 fractional digits
+  const padded = (fracPart + "0".repeat(8)).slice(0, 8);
+  const whole = BigInt(intPart || "0");
+  const frac = BigInt(padded || "0");
+  const thorUnits = whole * 100_000_000n + frac;
+  if (thorUnits <= 0n) throw new Error("Amount must be positive");
+  return thorUnits.toString();
 }
 
-function fromThorAmount(thorRaw: string, targetDecimals: number): string {
-  const units = BigInt(thorRaw);
-  // thor is 1e8; convert to target decimals
-  // amount_human = units / 1e8
-  const human = Number(units) / 1e8;
-  return human.toFixed(Math.min(8, targetDecimals));
+/**
+ * Convert THOR 1e8 integer string → human string with target display decimals.
+ * For BCH (8) this is exact; for assets with fewer decimals we trim trailing zeros.
+ */
+export function fromThorAmount(thorRaw: string, targetDecimals: number): string {
+  if (!/^\d+$/.test(thorRaw)) throw new Error("Invalid THOR amount");
+  // Reuse registry helper: THOR is always 1e8 scale
+  return fromRawAmount(thorRaw, 8);
 }
 
 export async function getThorQuote(
@@ -68,12 +77,19 @@ export async function getThorQuote(
   const res = await fetch(url, { next: { revalidate: 0 } });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`THORChain quote failed (${res.status}): ${text.slice(0, 200)}`);
+    throw new Error(
+      `THORChain quote failed (${res.status}): ${text.slice(0, 200)}`
+    );
   }
 
   const data = (await res.json()) as {
     expected_amount_out?: string;
-    fees?: { outbound?: string; liquidity?: string; total?: string; slippage_bps?: number };
+    fees?: {
+      outbound?: string;
+      liquidity?: string;
+      total?: string;
+      slippage_bps?: number;
+    };
     expiry?: number;
     inbound_address?: string;
     router?: string;
@@ -82,15 +98,35 @@ export async function getThorQuote(
     warning?: string;
   };
 
-  if (!data.expected_amount_out) {
-    throw new Error("THORChain returned no expected_amount_out");
+  if (!data.expected_amount_out || !/^\d+$/.test(data.expected_amount_out)) {
+    throw new Error("THORChain returned no valid expected_amount_out");
   }
 
+  const outRaw = BigInt(data.expected_amount_out);
+  if (outRaw <= 0n) {
+    throw new Error("THORChain expected_amount_out is zero");
+  }
+
+  // THOR amounts are 1e8; convert to human for display
   const expectedHuman = fromThorAmount(data.expected_amount_out, toAsset.decimals);
+  // For native decimals conversion of fees (also 1e8 on THOR)
   const networkFee =
-    data.fees?.outbound != null
-      ? fromThorAmount(data.fees.outbound, toAsset.decimals)
+    data.fees?.outbound != null && /^\d+$/.test(data.fees.outbound)
+      ? fromThorAmount(data.fees.outbound, 8)
       : null;
+
+  // Store expectedOutputRaw in destination native base units when possible.
+  // For BCH: 1e8 already matches. For USDT (6): convert 1e8 → 1e6 via integer.
+  let expectedOutputRaw: string;
+  if (toAsset.decimals === 8) {
+    expectedOutputRaw = data.expected_amount_out;
+  } else if (toAsset.decimals < 8) {
+    const scale = 10n ** BigInt(8 - toAsset.decimals);
+    expectedOutputRaw = (outRaw / scale).toString();
+  } else {
+    const scale = 10n ** BigInt(toAsset.decimals - 8);
+    expectedOutputRaw = (outRaw * scale).toString();
+  }
 
   return {
     provider: "thorchain",
@@ -99,14 +135,14 @@ export async function getThorQuote(
     inputAmount: humanAmount,
     inputAmountRaw: toRawAmount(humanAmount, fromAsset.decimals),
     expectedOutput: expectedHuman,
-    expectedOutputRaw: toRawAmount(expectedHuman, toAsset.decimals),
+    expectedOutputRaw,
     networkFee,
     providerFee:
-      data.fees?.liquidity != null
-        ? fromThorAmount(data.fees.liquidity, toAsset.decimals)
+      data.fees?.liquidity != null && /^\d+$/.test(data.fees.liquidity)
+        ? fromThorAmount(data.fees.liquidity, 8)
         : null,
     priceImpactBps: data.fees?.slippage_bps ?? null,
-    minimumReceived: null, // THOR does not always surface min-out in same field
+    minimumReceived: null,
     expiry: data.expiry ?? null,
     inboundAddress: data.inbound_address,
     router: data.router,
