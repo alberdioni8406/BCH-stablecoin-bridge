@@ -1,14 +1,12 @@
 /**
  * Cauldron (CashTokens DEX) adapter — read-only quotes from Riften Labs indexer.
  *
- * Honest limits:
- * - Indexer provides live pool reserves (sats + token base units).
- * - We compute constant-product (x*y=k) quotes with a 0.3% fee model
- *   matching typical Cauldron pool behaviour.
- * - Transaction construction requires CashScript + a BCH wallet signer
- *   (see @mr-zwets/cauldron-swap-sdk). This module does NOT build or
- *   broadcast transactions. Execution remains disabled until a supported
- *   wallet adapter is wired.
+ * Model (verified against https://docs.riftenlabs.com/cauldron/swap/):
+ * - Micro-pools: each pool is an independent CPMM UTXO (tokens * sats = k).
+ * - Fee: ~0.3% to LPs — contract uses abs(Δsats) * 3 / 1000.
+ * - Trades may span multiple pools; for estimates we quote each pool
+ *   independently and pick the best single-pool output (conservative).
+ * - Does NOT build or broadcast transactions.
  */
 
 import type { AssetId, NormalizedQuote } from "@/lib/types";
@@ -17,11 +15,14 @@ import { getAsset, fromRawAmount } from "@/lib/assets/registry";
 const INDEXER =
   process.env.CAULDRON_INDEXER_URL || "https://indexer.riften.net/cauldron";
 
-/** Category IDs we support */
+/** Category IDs — must match registry */
 export const CAULDRON_TOKENS: Partial<Record<AssetId, string>> = {
   musd: "b38a33f750f84c5c169a6f23cb873e6e79605021585d4f3408789689ed87f366",
   pusd: "2469acc5afa4b10cb5b5c04afb89c3a3ffd61c5da9c01e26d00951cae2a02544",
 };
+
+/** LP fee: 0.3% → 30 bps (docs: abs(deltaSats) * 3 / 1000) */
+export const CAULDRON_FEE_BPS = 30;
 
 export interface CauldronPool {
   pool_id: string;
@@ -52,7 +53,6 @@ export async function fetchCurrentPriceSats(tokenId: string): Promise<number | n
   return typeof data.price === "number" ? data.price : null;
 }
 
-/** Aggregate reserves across all active pools for a token */
 export function aggregateReserves(pools: CauldronPool[]): {
   totalSats: bigint;
   totalTokens: bigint;
@@ -68,15 +68,14 @@ export function aggregateReserves(pools: CauldronPool[]): {
 }
 
 /**
- * Constant-product swap with feeBps (default 30 = 0.3%).
- * buyTokens: spend sats → receive tokens
- * sellTokens: spend tokens → receive sats
+ * Constant-product swap with fee on input (approximation of Cauldron fee).
+ * All values are integer base units (sats or token base units).
  */
 export function quoteConstantProduct(
   reserveIn: bigint,
   reserveOut: bigint,
   amountIn: bigint,
-  feeBps = 30
+  feeBps = CAULDRON_FEE_BPS
 ): { amountOut: bigint; priceImpactBps: number } {
   if (reserveIn <= 0n || reserveOut <= 0n || amountIn <= 0n) {
     return { amountOut: 0n, priceImpactBps: 0 };
@@ -85,21 +84,91 @@ export function quoteConstantProduct(
   const amountInWithFee = amountIn * feeFactor;
   const numerator = amountInWithFee * reserveOut;
   const denominator = reserveIn * 10000n + amountInWithFee;
+  if (denominator === 0n) return { amountOut: 0n, priceImpactBps: 0 };
   const amountOut = numerator / denominator;
 
-  // Spot price impact approximation
-  const spot = Number(reserveOut) / Number(reserveIn);
-  const effective =
-    Number(amountOut) > 0 ? Number(amountOut) / Number(amountIn) : 0;
-  const impact =
-    spot > 0 ? Math.max(0, Math.round((1 - effective / spot) * 10000)) : 0;
+  let priceImpactBps = 0;
+  if (amountIn > 0n && reserveOut > 0n) {
+    const idealOut = (amountIn * reserveOut) / reserveIn;
+    if (idealOut > amountOut && idealOut > 0n) {
+      priceImpactBps = Number(((idealOut - amountOut) * 10000n) / idealOut);
+    }
+  }
 
-  return { amountOut, priceImpactBps: impact };
+  return { amountOut, priceImpactBps };
+}
+
+export interface PoolQuoteResult {
+  poolId: string;
+  amountOut: bigint;
+  priceImpactBps: number;
+  reserveIn: bigint;
+  reserveOut: bigint;
 }
 
 /**
- * Quote BCH ↔ MUSD/PUSD using live aggregated pool reserves.
- * amount is human-readable string in the from-asset unit.
+ * Quote each pool independently; return the best amountOut.
+ */
+export function quoteBestPool(
+  pools: CauldronPool[],
+  amountIn: bigint,
+  direction: "buyToken" | "sellToken"
+): { best: PoolQuoteResult | null; candidates: PoolQuoteResult[] } {
+  const candidates: PoolQuoteResult[] = [];
+
+  for (const p of pools) {
+    const sats = BigInt(Math.floor(p.sats));
+    const tokens = BigInt(Math.floor(p.tokens));
+    if (sats <= 0n || tokens <= 0n) continue;
+
+    let reserveIn: bigint;
+    let reserveOut: bigint;
+    if (direction === "buyToken") {
+      reserveIn = sats;
+      reserveOut = tokens;
+    } else {
+      reserveIn = tokens;
+      reserveOut = sats;
+    }
+
+    if (amountIn >= reserveIn) continue;
+
+    const q = quoteConstantProduct(reserveIn, reserveOut, amountIn);
+    if (q.amountOut <= 0n) continue;
+
+    candidates.push({
+      poolId: p.pool_id,
+      amountOut: q.amountOut,
+      priceImpactBps: q.priceImpactBps,
+      reserveIn,
+      reserveOut,
+    });
+  }
+
+  candidates.sort((a, b) =>
+    a.amountOut > b.amountOut ? -1 : a.amountOut < b.amountOut ? 1 : 0
+  );
+
+  return { best: candidates[0] ?? null, candidates };
+}
+
+/** Parse human amount to integer base units without float for the integer part. */
+export function parseToBaseUnits(human: string, decimals: number): bigint {
+  const cleaned = human.trim();
+  if (!cleaned || cleaned === ".") throw new Error("Invalid amount");
+  const [intPart, fracPart = ""] = cleaned.split(".");
+  if (!/^\d*$/.test(intPart) || !/^\d*$/.test(fracPart)) {
+    throw new Error("Invalid amount characters");
+  }
+  const padded = (fracPart + "0".repeat(decimals)).slice(0, decimals);
+  const whole = BigInt(intPart || "0");
+  const frac = BigInt(padded || "0");
+  const base = 10n ** BigInt(decimals);
+  return whole * base + frac;
+}
+
+/**
+ * Quote BCH ↔ MUSD/PUSD using per-pool CPMM and best single-pool fill.
  */
 export async function getCauldronQuote(
   from: AssetId,
@@ -127,41 +196,29 @@ export async function getCauldronQuote(
     throw new Error(`No active Cauldron pools for token ${tokenId}`);
   }
 
+  const direction = isBuyToken ? "buyToken" : "sellToken";
+  const amountIn = parseToBaseUnits(
+    humanAmount,
+    isBuyToken ? 8 : fromAsset.decimals
+  );
+
+  if (amountIn <= 0n) {
+    throw new Error("Amount must be positive");
+  }
+
+  const { best, candidates } = quoteBestPool(pools, amountIn, direction);
+
+  if (!best) {
+    throw new Error(
+      "No single pool can absorb this trade size without draining reserves. Try a smaller amount."
+    );
+  }
+
+  const expectedOutput = isBuyToken
+    ? fromRawAmount(best.amountOut.toString(), toAsset.decimals)
+    : fromRawAmount(best.amountOut.toString(), 8);
+
   const { totalSats, totalTokens, poolCount } = aggregateReserves(pools);
-  if (totalSats === 0n || totalTokens === 0n) {
-    throw new Error("Cauldron pools have zero reserves");
-  }
-
-  const num = Number(humanAmount);
-  if (!Number.isFinite(num) || num <= 0) {
-    throw new Error("Invalid amount");
-  }
-
-  let amountOutRaw: bigint;
-  let priceImpactBps: number;
-  let inputRaw: string;
-  let expectedOutput: string;
-
-  if (isBuyToken) {
-    // humanAmount is BCH → convert to sats
-    const satsIn = BigInt(Math.floor(num * 1e8));
-    inputRaw = satsIn.toString();
-    const q = quoteConstantProduct(totalSats, totalTokens, satsIn);
-    amountOutRaw = q.amountOut;
-    priceImpactBps = q.priceImpactBps;
-    expectedOutput = fromRawAmount(amountOutRaw.toString(), toAsset.decimals);
-  } else {
-    // humanAmount is token → base units
-    const scale = 10 ** fromAsset.decimals;
-    const tokensIn = BigInt(Math.floor(num * scale));
-    inputRaw = tokensIn.toString();
-    const q = quoteConstantProduct(totalTokens, totalSats, tokensIn);
-    amountOutRaw = q.amountOut;
-    priceImpactBps = q.priceImpactBps;
-    // sats → BCH human
-    expectedOutput = fromRawAmount(amountOutRaw.toString(), 8);
-  }
-
   const priceSats = await fetchCurrentPriceSats(tokenId);
 
   return {
@@ -169,24 +226,28 @@ export async function getCauldronQuote(
     fromAsset: from,
     toAsset: to,
     inputAmount: humanAmount,
-    inputAmountRaw: inputRaw,
+    inputAmountRaw: amountIn.toString(),
     expectedOutput,
-    expectedOutputRaw: amountOutRaw.toString(),
+    expectedOutputRaw: best.amountOut.toString(),
     networkFee: null,
-    providerFee: "0.3% pool fee (estimated)",
-    priceImpactBps,
+    providerFee: "0.3% LP fee (per Cauldron docs)",
+    priceImpactBps: best.priceImpactBps,
     minimumReceived: null,
-    expiry: Math.floor(Date.now() / 1000) + 120, // short — reserves move
-    notes: `Live reserves from ${poolCount} Cauldron pool(s). Indexer price ≈ ${
+    expiry: Math.floor(Date.now() / 1000) + 120,
+    notes: `Best single-pool estimate among ${candidates.length}/${poolCount} active pools (pool ${best.poolId.slice(0, 8)}…). Multi-pool routing at execution may improve fill. Indexer spot ≈ ${
       priceSats != null ? priceSats.toFixed(2) : "?"
-    } sats/base-unit. Quote is estimated via constant-product; actual fill depends on pool selection at sign time. Execution requires a CashTokens BCH wallet + Cauldron SDK — not yet connected.`,
+    } sats/base-unit. Not executable until a CashTokens wallet signs.`,
     isPrototypeSample: false,
     raw: {
+      method: "best_single_pool",
       poolCount,
+      candidateCount: candidates.length,
+      bestPoolId: best.poolId,
       totalSats: totalSats.toString(),
       totalTokens: totalTokens.toString(),
       tokenId,
       indexerPriceSats: priceSats,
+      feeBps: CAULDRON_FEE_BPS,
     },
   };
 }
