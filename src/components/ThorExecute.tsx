@@ -138,7 +138,6 @@ export function ThorExecute({
   const quoteExpired =
     prep != null && prep.expiry < Math.floor(Date.now() / 1000) + 30;
 
-  // After approve confirms, move phase + refresh allowance
   useEffect(() => {
     if (approveReceipt.isSuccess && phase === "approve_pending") {
       setPhase("approved");
@@ -150,7 +149,6 @@ export function ThorExecute({
     }
   }, [approveReceipt.isSuccess, approveReceipt.isError, phase, refetchAllowance]);
 
-  // After deposit confirms on EVM — not route-complete
   useEffect(() => {
     if (depositReceipt.isSuccess && phase === "deposit_pending") {
       setPhase("evm_confirmed");
@@ -175,7 +173,6 @@ export function ThorExecute({
     }
   }, [depositReceipt.isSuccess, depositReceipt.isError, phase, transferId, depositHash]);
 
-  // Poll THOR status after EVM confirm
   useEffect(() => {
     if (phase !== "evm_confirmed" && phase !== "thor_pending") return;
     if (!depositHash) return;
@@ -237,7 +234,9 @@ export function ThorExecute({
     resetWrite();
     try {
       if (!bchDestination || bchDestination.length < 15) {
-        throw new Error("Enter your BCH destination address (bitcoincash:… or q…).");
+        throw new Error(
+          "Enter your BCH destination address (bitcoincash:… or q…)."
+        );
       }
       const res = await fetch("/api/thor/prepare", {
         method: "POST",
@@ -272,10 +271,7 @@ export function ThorExecute({
       ) {
         throw new Error("Incomplete THOR preparation response");
       }
-      // Deposit asset must match selected token contract
-      if (
-        p.depositArgs.asset.toLowerCase() !== tokenAddress.toLowerCase()
-      ) {
+      if (p.depositArgs.asset.toLowerCase() !== tokenAddress.toLowerCase()) {
         throw new Error(
           `Asset mismatch: prepare returned ${p.depositArgs.asset}, expected ${tokenAddress}`
         );
@@ -371,7 +367,6 @@ export function ThorExecute({
       setPhase("idle");
       return;
     }
-    // Re-check expiry window
     if (prep.expiry < Math.floor(Date.now() / 1000) + 20) {
       setPrepError("Quote about to expire — prepare a fresh quote");
       return;
@@ -415,7 +410,7 @@ export function ThorExecute({
 
   const wrongChain = isConnected && chainId !== preferredChain;
   const canDeposit =
-    prep &&
+    Boolean(prep) &&
     isConnected &&
     !wrongChain &&
     amountOk &&
@@ -549,10 +544,7 @@ export function ThorExecute({
             type="button"
             onClick={runDeposit}
             disabled={
-              !canDeposit ||
-              isWriting ||
-              depositReceipt.isLoading ||
-              phase === "deposit_pending"
+              !canDeposit || isWriting || depositReceipt.isLoading
             }
             className="w-full py-2.5 rounded-lg bg-bch text-black text-sm font-semibold disabled:opacity-40"
           >
@@ -569,7 +561,10 @@ export function ThorExecute({
         <p className="text-xs text-amber-400">{writeError.message.slice(0, 240)}</p>
       )}
 
-      {(depositHash || phase === "evm_confirmed" || phase === "thor_pending" || phase === "thor_observed") && (
+      {(depositHash ||
+        phase === "evm_confirmed" ||
+        phase === "thor_pending" ||
+        phase === "thor_observed") && (
         <div
           className={clsx(
             "text-sm rounded-lg p-3 border flex gap-2",
