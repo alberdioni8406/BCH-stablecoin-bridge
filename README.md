@@ -88,3 +88,14 @@ npm run build
 ## License
 
 MIT — see LICENSE
+
+
+## EVM execution (leg 1)
+
+- Connect injected wallet (MetaMask / Rabby) via wagmi
+- Enter your BCH address for THOR outbound
+- Prepare → Approve USDT → `depositWithExpiry`
+- Track source tx on Etherscan/BscScan; wait for BCH in your wallet
+- **Leg 2 (Cauldron)** is not automated — requires a CashTokens BCH wallet
+
+`NEXT_PUBLIC_APP_MODE=live` required for real THOR params.
