@@ -20,7 +20,7 @@ export const PROVIDER_CAPABILITIES: ProviderCapability[] = [
       "Amounts in THORChain 1e8 base units for quote API.",
       "EVM deposits require router approval + depositWithExpiry.",
     ],
-    lastChecked: "2026-10-28T14:00:00Z",
+    lastChecked: "2026-10-29",
   },
   {
     id: "cauldron",
@@ -37,7 +37,7 @@ export const PROVIDER_CAPABILITIES: ProviderCapability[] = [
       "Liquidity is thin; always check live pool depths before routing.",
       "MUSD contract status may vary (relaunch notes observed).",
     ],
-    lastChecked: "2026-10-28T14:00:00Z",
+    lastChecked: "2026-10-29",
   },
   {
     id: "rango",
@@ -52,6 +52,6 @@ export const PROVIDER_CAPABILITIES: ProviderCapability[] = [
       "Treat as optional aggregator for EVM ↔ BCH legs only.",
       "Requires API key for production volume; public test key exists.",
     ],
-    lastChecked: "2026-10-28T14:00:00Z",
+    lastChecked: "2026-10-29",
   },
 ];
