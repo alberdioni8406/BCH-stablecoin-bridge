@@ -2,10 +2,11 @@
 
 /**
  * THORChain EVM leg-1 execution panel.
- * Prepare → Approve USDT → depositWithExpiry. No Cauldron auto-start.
+ * Prepare → Approve (wait confirm) → depositWithExpiry → monitor THOR.
+ * Leg 2 is NEVER auto-spent; recovery guidance only.
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   useAccount,
   useWriteContract,
@@ -14,20 +15,22 @@ import {
   useChainId,
 } from "wagmi";
 import { mainnet, bsc } from "wagmi/chains";
-import {
-  erc20Abi,
-  thorRouterAbi,
-  USDT_ETH,
-  USDT_BSC,
-} from "@/lib/wagmi/config";
+import { erc20Abi, thorRouterAbi } from "@/lib/wagmi/config";
 import { ConnectWallet } from "./ConnectWallet";
 import type { AssetId } from "@/lib/types";
 import { getAsset } from "@/lib/assets/registry";
 import {
+  getEvmTokenAddress,
+  getEvmChainId,
+  isExecutableEvmAsset,
+} from "@/lib/providers/evmTokens";
+import {
   createTransferId,
   saveTransfer,
+  getTransfer,
   type TransferRecord,
 } from "@/lib/transfer/stateMachine";
+import { leg2RecoveryHint } from "@/lib/bch/cauldronExecution";
 import { Loader2, AlertTriangle, CheckCircle2 } from "lucide-react";
 import clsx from "clsx";
 
@@ -46,6 +49,19 @@ interface ThorPrep {
     expiry: number;
   };
 }
+
+type Leg1Phase =
+  | "idle"
+  | "prepared"
+  | "approving"
+  | "approve_pending"
+  | "approved"
+  | "depositing"
+  | "deposit_pending"
+  | "evm_confirmed"
+  | "thor_pending"
+  | "thor_observed"
+  | "failed";
 
 interface Props {
   fromAsset: AssetId;
@@ -67,24 +83,28 @@ export function ThorExecute({
   const [prep, setPrep] = useState<ThorPrep | null>(null);
   const [prepError, setPrepError] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
-  const [step, setStep] = useState<
-    "idle" | "prepared" | "approving" | "depositing" | "done"
-  >("idle");
+  const [phase, setPhase] = useState<Leg1Phase>("idle");
   const [transferId, setTransferId] = useState<string | null>(null);
-  const [localTxHash, setLocalTxHash] = useState<`0x${string}` | undefined>();
+  const [approveHash, setApproveHash] = useState<`0x${string}` | undefined>();
+  const [depositHash, setDepositHash] = useState<`0x${string}` | undefined>();
+  const [thorNote, setThorNote] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
 
+  const executable = isExecutableEvmAsset(fromAsset);
   const fromMeta = getAsset(fromAsset);
-  const preferredChain = fromMeta.network === "bsc" ? bsc.id : mainnet.id;
-  const tokenAddress = fromMeta.network === "bsc" ? USDT_BSC : USDT_ETH;
+  const preferredChain = executable ? getEvmChainId(fromAsset) : mainnet.id;
+  const tokenAddress = executable
+    ? getEvmTokenAddress(fromAsset)
+    : ("0x0000000000000000000000000000000000000000" as const);
 
   const routerAddr = prep?.router as `0x${string}` | undefined;
 
-  const { data: allowance } = useReadContract({
+  const { data: allowance, refetch: refetchAllowance } = useReadContract({
     address: tokenAddress,
     abi: erc20Abi,
     functionName: "allowance",
     args: address && routerAddr ? [address, routerAddr] : undefined,
-    query: { enabled: Boolean(address && routerAddr) },
+    query: { enabled: Boolean(address && routerAddr && executable) },
   });
 
   const { data: balance } = useReadContract({
@@ -92,7 +112,7 @@ export function ThorExecute({
     abi: erc20Abi,
     functionName: "balanceOf",
     args: address ? [address] : undefined,
-    query: { enabled: Boolean(address) },
+    query: { enabled: Boolean(address && executable) },
   });
 
   const {
@@ -102,8 +122,8 @@ export function ThorExecute({
     reset: resetWrite,
   } = useWriteContract();
 
-  const { isLoading: isConfirming, isSuccess: isConfirmed } =
-    useWaitForTransactionReceipt({ hash: localTxHash });
+  const approveReceipt = useWaitForTransactionReceipt({ hash: approveHash });
+  const depositReceipt = useWaitForTransactionReceipt({ hash: depositHash });
 
   const needsApprove =
     prep != null &&
@@ -115,16 +135,109 @@ export function ThorExecute({
     prep != null &&
     BigInt(balance as bigint) >= BigInt(prep.amountNative);
 
+  const quoteExpired =
+    prep != null && prep.expiry < Math.floor(Date.now() / 1000) + 30;
+
+  // After approve confirms, move phase + refresh allowance
+  useEffect(() => {
+    if (approveReceipt.isSuccess && phase === "approve_pending") {
+      setPhase("approved");
+      void refetchAllowance();
+    }
+    if (approveReceipt.isError && phase === "approve_pending") {
+      setPhase("failed");
+      setStatusError("Approve transaction failed or reverted");
+    }
+  }, [approveReceipt.isSuccess, approveReceipt.isError, phase, refetchAllowance]);
+
+  // After deposit confirms on EVM — not route-complete
+  useEffect(() => {
+    if (depositReceipt.isSuccess && phase === "deposit_pending") {
+      setPhase("evm_confirmed");
+      if (transferId) {
+        const existing = getTransfer(transferId);
+        if (existing) {
+          saveTransfer({
+            ...existing,
+            state: "SOURCE_CONFIRMED",
+            legs: existing.legs.map((l, i) =>
+              i === 0
+                ? { ...l, status: "confirmed", txHash: depositHash }
+                : l
+            ),
+          });
+        }
+      }
+    }
+    if (depositReceipt.isError && phase === "deposit_pending") {
+      setPhase("failed");
+      setStatusError("Deposit transaction failed or reverted");
+    }
+  }, [depositReceipt.isSuccess, depositReceipt.isError, phase, transferId, depositHash]);
+
+  // Poll THOR status after EVM confirm
+  useEffect(() => {
+    if (phase !== "evm_confirmed" && phase !== "thor_pending") return;
+    if (!depositHash) return;
+    setPhase("thor_pending");
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `/api/thor/status?tx=${encodeURIComponent(depositHash)}`
+        );
+        const data = await res.json();
+        if (cancelled) return;
+        setThorNote(data.notes ?? null);
+        if (data.settled) {
+          setPhase("thor_observed");
+          if (transferId) {
+            const existing = getTransfer(transferId);
+            if (existing) {
+              saveTransfer({
+                ...existing,
+                state: "AWAITING_INTERMEDIATE",
+                recoveryHint: leg2RecoveryHint(
+                  bchDestination,
+                  prep
+                    ? (Number(prep.expectedAmountOut) / 1e8).toFixed(8)
+                    : undefined
+                ),
+              });
+            }
+          }
+        }
+      } catch {
+        /* soft fail */
+      }
+    };
+    void poll();
+    const id = setInterval(poll, 20000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [phase, depositHash, transferId, bchDestination, prep]);
+
   const prepare = useCallback(async () => {
+    if (!executable) {
+      setPrepError(
+        `${fromAsset} execution is not enabled yet. Use eth-usdt or bsc-usdt.`
+      );
+      return;
+    }
     setPreparing(true);
     setPrepError(null);
     setPrep(null);
-    setStep("idle");
-    setLocalTxHash(undefined);
+    setPhase("idle");
+    setApproveHash(undefined);
+    setDepositHash(undefined);
+    setThorNote(null);
+    setStatusError(null);
     resetWrite();
     try {
       if (!bchDestination || bchDestination.length < 15) {
-        throw new Error("Enter your BCH destination address (bitcoincash:…).");
+        throw new Error("Enter your BCH destination address (bitcoincash:… or q…).");
       }
       const res = await fetch("/api/thor/prepare", {
         method: "POST",
@@ -159,20 +272,28 @@ export function ThorExecute({
       ) {
         throw new Error("Incomplete THOR preparation response");
       }
-      if ((p.expiry ?? 0) < Math.floor(Date.now() / 1000)) {
-        throw new Error("Quote already expired — prepare again");
+      // Deposit asset must match selected token contract
+      if (
+        p.depositArgs.asset.toLowerCase() !== tokenAddress.toLowerCase()
+      ) {
+        throw new Error(
+          `Asset mismatch: prepare returned ${p.depositArgs.asset}, expected ${tokenAddress}`
+        );
+      }
+      if ((p.expiry ?? 0) < Math.floor(Date.now() / 1000) + 60) {
+        throw new Error("Quote expires too soon — prepare again");
       }
       const normalized: ThorPrep = {
         inboundAddress: p.inboundAddress,
         router: p.router,
         memo: p.memo,
-        expiry: p.expiry ?? Math.floor(Date.now() / 1000) + 600,
+        expiry: p.expiry!,
         amountNative: p.amountNative,
         expectedAmountOut: p.expectedAmountOut ?? "0",
         depositArgs: p.depositArgs,
       };
       setPrep(normalized);
-      setStep("prepared");
+      setPhase("prepared");
 
       const id = createTransferId();
       const rec: TransferRecord = {
@@ -208,30 +329,55 @@ export function ThorExecute({
       setTransferId(id);
     } catch (e) {
       setPrepError(e instanceof Error ? e.message : String(e));
+      setPhase("failed");
     } finally {
       setPreparing(false);
     }
-  }, [amount, bchDestination, fromAsset, toAsset, resetWrite]);
+  }, [
+    amount,
+    bchDestination,
+    executable,
+    fromAsset,
+    toAsset,
+    tokenAddress,
+    resetWrite,
+  ]);
 
   const runApprove = async () => {
-    if (!prep || !address) return;
-    setStep("approving");
+    if (!prep || !address || !executable) return;
+    setPhase("approving");
+    setStatusError(null);
     try {
-      await writeContractAsync({
+      const hash = await writeContractAsync({
         address: tokenAddress,
         abi: erc20Abi,
         functionName: "approve",
         args: [prep.router as `0x${string}`, BigInt(prep.amountNative)],
       });
-      setStep("prepared");
-    } catch {
-      setStep("prepared");
+      setApproveHash(hash);
+      setPhase("approve_pending");
+    } catch (e) {
+      setPhase("prepared");
+      setStatusError(
+        e instanceof Error ? e.message.slice(0, 200) : "Approve rejected"
+      );
     }
   };
 
   const runDeposit = async () => {
-    if (!prep) return;
-    setStep("depositing");
+    if (!prep || !executable) return;
+    if (quoteExpired) {
+      setPrepError("Quote expired — click Prepare again");
+      setPhase("idle");
+      return;
+    }
+    // Re-check expiry window
+    if (prep.expiry < Math.floor(Date.now() / 1000) + 20) {
+      setPrepError("Quote about to expire — prepare a fresh quote");
+      return;
+    }
+    setPhase("depositing");
+    setStatusError(null);
     try {
       const hash = await writeContractAsync({
         address: prep.router as `0x${string}`,
@@ -245,53 +391,68 @@ export function ThorExecute({
           BigInt(prep.depositArgs.expiry),
         ],
       });
-      setLocalTxHash(hash);
+      setDepositHash(hash);
+      setPhase("deposit_pending");
       if (transferId) {
-        const rec: TransferRecord = {
-          id: transferId,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          state: "SOURCE_BROADCAST",
-          from: fromAsset,
-          to: toAsset,
-          inputAmount: amount,
-          destinationBch: bchDestination,
-          legs: [
-            {
-              index: 0,
-              provider: "thorchain",
-              from: fromAsset,
-              to: "bch-native",
-              status: "broadcast",
-              txHash: hash,
-            },
-          ],
-          intermediateAsset: "bch-native",
-        };
-        saveTransfer(rec);
+        const existing = getTransfer(transferId);
+        if (existing) {
+          saveTransfer({
+            ...existing,
+            state: "SOURCE_BROADCAST",
+            legs: existing.legs.map((l, i) =>
+              i === 0 ? { ...l, status: "broadcast", txHash: hash } : l
+            ),
+          });
+        }
       }
-      setStep("done");
-    } catch {
-      setStep("prepared");
+    } catch (e) {
+      setPhase(needsApprove ? "approved" : "prepared");
+      setStatusError(
+        e instanceof Error ? e.message.slice(0, 200) : "Deposit rejected"
+      );
     }
   };
 
   const wrongChain = isConnected && chainId !== preferredChain;
+  const canDeposit =
+    prep &&
+    isConnected &&
+    !wrongChain &&
+    amountOk &&
+    !needsApprove &&
+    (phase === "prepared" || phase === "approved") &&
+    !quoteExpired;
+
+  if (!executable) {
+    return (
+      <div className="mt-6 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">
+        Execution for <span className="font-mono">{fromAsset}</span> is not
+        enabled. Use <span className="font-mono">eth-usdt</span> or{" "}
+        <span className="font-mono">bsc-usdt</span> until USDC path is validated.
+      </div>
+    );
+  }
 
   return (
     <div className="mt-6 rounded-xl border border-surface-border bg-surface-raised p-4 space-y-4">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <h3 className="text-sm font-semibold">
-          Execute leg 1 — THORChain (EVM → BCH)
+          Execute leg 1 — THORChain ({fromMeta.symbol} → BCH)
         </h3>
         <ConnectWallet preferredChainId={preferredChain} />
       </div>
 
       <p className="text-[11px] text-gray-500">
-        Non-custodial. You approve and sign in your own wallet. Leg 2 (BCH →
-        PUSD/MUSD) is <strong className="text-gray-400">not</strong> started
-        automatically.
+        Non-custodial. Approve and deposit only after reviewing parameters. Leg 2
+        (BCH → PUSD) is <strong className="text-gray-300">never</strong> spent
+        automatically — verify BCH in your wallet, then swap in a CashTokens wallet
+        (e.g. Paytaca).
       </p>
+
+      <div className="text-[11px] font-mono text-gray-500">
+        Token {tokenAddress.slice(0, 10)}… · chain {preferredChain} · decimals{" "}
+        {fromMeta.decimals} · phase {phase}
+      </div>
 
       <div>
         <label className="text-xs text-gray-500">Your BCH destination address</label>
@@ -299,7 +460,7 @@ export function ThorExecute({
           type="text"
           value={bchDestination}
           onChange={(e) => onBchDestinationChange(e.target.value.trim())}
-          placeholder="bitcoincash:q…"
+          placeholder="bitcoincash:q… (prefix stripped for THOR memo)"
           className="mt-1 w-full bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm font-mono"
         />
       </div>
@@ -319,10 +480,10 @@ export function ThorExecute({
         )}
       </button>
 
-      {prepError && (
+      {(prepError || statusError) && (
         <div className="text-sm text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 flex gap-2">
           <AlertTriangle size={16} className="shrink-0 mt-0.5" />
-          {prepError}
+          {prepError || statusError}
         </div>
       )}
 
@@ -330,15 +491,24 @@ export function ThorExecute({
         <div className="text-xs space-y-2 font-mono bg-surface-overlay rounded-lg p-3 border border-surface-border">
           <Row label="Inbound" value={prep.inboundAddress} />
           <Row label="Router" value={prep.router} />
+          <Row label="Asset (deposit)" value={prep.depositArgs.asset} />
           <Row label="Amount (native)" value={prep.amountNative} />
           <Row label="Memo" value={prep.memo} />
-          <Row label="Expiry" value={new Date(prep.expiry * 1000).toLocaleString()} />
+          <Row
+            label="Expiry"
+            value={new Date(prep.expiry * 1000).toLocaleString()}
+            warn={quoteExpired}
+          />
           <Row
             label="Expected BCH (est.)"
             value={(Number(prep.expectedAmountOut) / 1e8).toFixed(8)}
           />
           {balance !== undefined && (
-            <Row label="USDT balance (raw)" value={String(balance)} warn={!amountOk} />
+            <Row
+              label={`${fromMeta.symbol} balance (raw)`}
+              value={String(balance)}
+              warn={!amountOk}
+            />
           )}
           {allowance !== undefined && (
             <Row
@@ -352,37 +522,45 @@ export function ThorExecute({
 
       {prep && isConnected && !wrongChain && (
         <div className="flex flex-col gap-2">
-          {needsApprove && step !== "done" && (
-            <button
-              type="button"
-              onClick={runApprove}
-              disabled={isWriting || isConfirming || !amountOk}
-              className="w-full py-2.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-100 text-sm font-medium disabled:opacity-40"
-            >
-              {isWriting && step === "approving"
-                ? "Confirm approve in wallet…"
-                : "1. Approve USDT for THOR router"}
-            </button>
-          )}
+          {needsApprove &&
+            phase !== "evm_confirmed" &&
+            phase !== "thor_pending" &&
+            phase !== "thor_observed" &&
+            phase !== "deposit_pending" && (
+              <button
+                type="button"
+                onClick={runApprove}
+                disabled={
+                  isWriting ||
+                  approveReceipt.isLoading ||
+                  !amountOk ||
+                  phase === "approve_pending"
+                }
+                className="w-full py-2.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-100 text-sm font-medium disabled:opacity-40"
+              >
+                {phase === "approve_pending" || approveReceipt.isLoading
+                  ? "Waiting for approve confirmation…"
+                  : phase === "approving"
+                    ? "Confirm approve in wallet…"
+                    : `1. Approve ${fromMeta.symbol} for THOR router`}
+              </button>
+            )}
           <button
             type="button"
             onClick={runDeposit}
             disabled={
+              !canDeposit ||
               isWriting ||
-              isConfirming ||
-              !amountOk ||
-              Boolean(needsApprove) ||
-              step === "done"
+              depositReceipt.isLoading ||
+              phase === "deposit_pending"
             }
             className="w-full py-2.5 rounded-lg bg-bch text-black text-sm font-semibold disabled:opacity-40"
           >
-            {isWriting && step === "depositing"
-              ? "Confirm deposit in wallet…"
-              : isConfirming
-                ? "Waiting for confirmation…"
-                : step === "done"
-                  ? "Deposit submitted"
-                  : "2. Deposit via depositWithExpiry"}
+            {phase === "deposit_pending" || depositReceipt.isLoading
+              ? "Waiting for deposit confirmation…"
+              : phase === "depositing"
+                ? "Confirm deposit in wallet…"
+                : "2. Deposit via depositWithExpiry"}
           </button>
         </div>
       )}
@@ -391,43 +569,52 @@ export function ThorExecute({
         <p className="text-xs text-amber-400">{writeError.message.slice(0, 240)}</p>
       )}
 
-      {(localTxHash || isConfirmed) && (
+      {(depositHash || phase === "evm_confirmed" || phase === "thor_pending" || phase === "thor_observed") && (
         <div
           className={clsx(
             "text-sm rounded-lg p-3 border flex gap-2",
-            isConfirmed
+            phase === "thor_observed"
               ? "bg-bch/10 border-bch/30 text-bch"
               : "bg-surface-overlay border-surface-border text-gray-300"
           )}
         >
-          {isConfirmed ? (
+          {phase === "thor_observed" ? (
             <CheckCircle2 size={16} />
           ) : (
             <Loader2 size={16} className="animate-spin" />
           )}
-          <div>
+          <div className="space-y-1">
             <p>
-              {isConfirmed
-                ? "Source tx confirmed on EVM."
-                : "Source tx submitted…"}
+              {phase === "thor_observed"
+                ? "THOR observed inbound — verify BCH in your wallet."
+                : phase === "evm_confirmed" || phase === "thor_pending"
+                  ? "EVM deposit confirmed — monitoring THORChain…"
+                  : "Deposit submitted…"}
             </p>
-            {localTxHash && (
+            {depositHash && (
               <a
                 href={
                   preferredChain === bsc.id
-                    ? `https://bscscan.com/tx/${localTxHash}`
-                    : `https://etherscan.io/tx/${localTxHash}`
+                    ? `https://bscscan.com/tx/${depositHash}`
+                    : `https://etherscan.io/tx/${depositHash}`
                 }
                 target="_blank"
                 rel="noreferrer"
                 className="font-mono text-xs underline"
               >
-                {localTxHash.slice(0, 14)}…
+                {depositHash.slice(0, 14)}…
               </a>
             )}
-            <p className="text-[11px] text-gray-400 mt-1">
-              Wait for THORChain to send BCH to your address, then use Tracker /
-              a CashTokens wallet for leg 2.
+            {thorNote && (
+              <p className="text-[11px] text-gray-400">{thorNote}</p>
+            )}
+            <p className="text-[11px] text-amber-200/90 pt-1">
+              {leg2RecoveryHint(
+                bchDestination,
+                prep
+                  ? (Number(prep.expectedAmountOut) / 1e8).toFixed(8)
+                  : undefined
+              )}
             </p>
           </div>
         </div>
