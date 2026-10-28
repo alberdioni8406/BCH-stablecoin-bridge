@@ -4,7 +4,8 @@ import { useState, useCallback } from "react";
 import { getEnabledAssets, getAsset } from "@/lib/assets/registry";
 import type { AssetId, NormalizedQuote } from "@/lib/types";
 import { findRoutes } from "@/lib/routing/routes";
-import { ArrowDownUp, AlertTriangle, Loader2, ExternalLink } from "lucide-react";
+import { ArrowDownUp, AlertTriangle, Loader2 } from "lucide-react";
+import { ThorExecute } from "./ThorExecute";
 import clsx from "clsx";
 
 const assets = getEnabledAssets();
@@ -23,6 +24,7 @@ export function SwapInterface() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<string>("");
+  const [bchDestination, setBchDestination] = useState("");
 
   const routes = findRoutes(fromId, toId);
 
@@ -301,6 +303,23 @@ export function SwapInterface() {
           atomic.
         </p>
       </div>
+
+      {/* THOR EVM execution — only when source is EVM and first leg is thorchain */}
+      {routes[0]?.legs[0]?.provider === "thorchain" &&
+        (fromId === "eth-usdt" ||
+          fromId === "eth-usdc" ||
+          fromId === "bsc-usdt" ||
+          fromId === "bsc-usdc") &&
+        amount &&
+        Number(amount) > 0 && (
+          <ThorExecute
+            fromAsset={fromId}
+            toAsset={toId}
+            amount={amount}
+            bchDestination={bchDestination}
+            onBchDestinationChange={setBchDestination}
+          />
+        )}
 
       {routeInfo && routeInfo.legs.length > 1 && (
         <div className="mt-6 rounded-xl border border-surface-border bg-surface-raised p-4">
