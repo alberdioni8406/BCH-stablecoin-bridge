@@ -49,3 +49,41 @@
 | BSC.USDT  | MUSD/PUSD  | PARTIALLY (multi-leg)|
 | MUSD/PUSD | ETH/BSC USDT | PARTIALLY (multi-leg)|
 
+
+---
+
+## Update 2026-10-28 (Phase 2 — executable path)
+
+### Cauldron indexer (verified live)
+
+- Base: `https://indexer.riften.net/cauldron`
+- PUSD category `2469acc5…2544`: **65+ active pools**, non-zero TVL (live check)
+- MUSD category `b38a33…f366`: active pools with liquidity
+- Current price endpoint returns sats-per-base-unit
+- Quote model: constant-product on **aggregated** reserves + 0.3% fee estimate
+- **Execution blocker remains:** `@mr-zwets/cauldron-swap-sdk` requires CashScript signer + Electrum provider; no Paytaca/Cashonize/WC BCH adapter is wired in this app yet. Signing is therefore **disabled** for Cauldron legs.
+
+### THORChain execution prep (verified)
+
+- Live quote via `gateway.liquify.com` returns `inbound_address`, `router`, `expected_amount_out`, `expiry`, fees
+- `/api/thor/prepare` returns depositWithExpiry parameters for the user wallet
+- App never holds keys; user must approve + call router from their own EVM wallet
+- Outbound verification is still manual (user checks BCH balance)
+
+### Multi-leg policy
+
+- ETH USDT → BCH → PUSD is **PARTIALLY_VERIFIED**: leg 1 quotes + prep are live; leg 2 quotes are live from indexer; leg 2 broadcast is blocked until wallet adapter exists
+- Legs are never presented as atomic
+- Recovery state preserves intermediate BCH ownership with explicit user instructions
+
+### What is genuinely executable today
+
+| Step | Status |
+|------|--------|
+| Live THOR quote ETH/BSC USDT ↔ BCH | Yes |
+| THOR inbound/router/memo for user wallet | Yes (prep API) |
+| Live Cauldron pool discovery + estimated quote | Yes |
+| Cauldron mainnet tx build + broadcast | **No** — needs BCH CashTokens wallet adapter |
+| Atomic multi-leg | **No** — by design non-atomic |
+| Claimed mainnet end-to-end success | **No** — not claimed |
+
