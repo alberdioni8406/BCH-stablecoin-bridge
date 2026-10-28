@@ -24,8 +24,7 @@ export default function RootLayout({
           </main>
           <footer className="border-t border-surface-border py-6 text-center text-sm text-gray-500">
             <p>
-              Non-custodial coordinator · Does not custody funds · Provider risk
-              applies
+              Non-custodial coordinator · Does not custody funds · Provider risk applies
             </p>
             <p className="mt-1">
               Mode:{" "}
