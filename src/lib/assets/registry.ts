@@ -143,7 +143,7 @@ export function fromRawAmount(raw: string, decimals: number): string {
   const base = BigInt(10 ** decimals);
   const intPart = bi / base;
   const frac = bi % base;
-  if (frac === 0n) return intPart.toString();
+  if (frac === BigInt(0)) return intPart.toString();
   const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
-  return `${intPart}.${fracStr}`;
+  return `\( {intPart}. \){fracStr}`;
 }
