@@ -14,6 +14,7 @@ export function SwapInterface() {
   const [toId, setToId] = useState<AssetId>("pusd");
   const [amount, setAmount] = useState("10");
   const [quote, setQuote] = useState<NormalizedQuote | null>(null);
+  const [multiLegNote, setMultiLegNote] = useState<string | null>(null);
   const [routeInfo, setRouteInfo] = useState<ReturnType<typeof findRoutes>[0] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,6 +26,7 @@ export function SwapInterface() {
     setLoading(true);
     setError(null);
     setQuote(null);
+    setMultiLegNote(null);
     try {
       const res = await fetch(
         `/api/quote?from=${fromId}&to=${toId}&amount=${encodeURIComponent(amount)}`
@@ -37,6 +39,8 @@ export function SwapInterface() {
       setMode(data.mode);
       setRouteInfo(data.route);
       if (data.quotes?.[0]) setQuote(data.quotes[0]);
+      if (data.multiLeg && data.notes) setMultiLegNote(data.notes);
+      else setMultiLegNote(null);
       if (data.warning) setError(data.warning);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Network error");
@@ -211,6 +215,12 @@ export function SwapInterface() {
                 {quote.notes}
               </p>
             )}
+          </div>
+        )}
+
+        {multiLegNote && (
+          <div className="mt-3 text-sm text-amber-200 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+            {multiLegNote}
           </div>
         )}
 
