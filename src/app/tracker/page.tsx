@@ -31,6 +31,15 @@ const STATE_ORDER: TransferState[] = [
 export default function TrackerPage() {
   const [transfers, setTransfers] = useState<TransferRecord[]>([]);
   const [selected, setSelected] = useState<TransferRecord | null>(null);
+  const [balanceInfo, setBalanceInfo] = useState<{
+    balanceSats?: string;
+    balanceBch?: string;
+    txCount?: number;
+    error?: string;
+    notes?: string;
+  } | null>(null);
+  const [balanceLoading, setBalanceLoading] = useState(false);
+  const [leg2Txid, setLeg2Txid] = useState("");
 
   const refresh = useCallback(() => {
     setTransfers(loadTransfers());
@@ -85,6 +94,68 @@ export default function TrackerPage() {
         next === "RECOVERY_REQUIRED"
           ? "First leg may have completed. Check your BCH wallet for intermediate funds. Start a new BCH → PUSD swap when ready. Do not re-send the ETH source tx."
           : selected.recoveryHint,
+    });
+    setSelected(updated);
+    refresh();
+  }
+
+
+  async function verifyBchBalance() {
+    if (!selected?.destinationBch) {
+      setBalanceInfo({ error: "No BCH destination on this transfer" });
+      return;
+    }
+    setBalanceLoading(true);
+    setBalanceInfo(null);
+    try {
+      const res = await fetch(
+        `/api/bch/balance?address=${encodeURIComponent(selected.destinationBch)}`
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setBalanceInfo({ error: data.error || "Balance lookup failed" });
+      } else {
+        setBalanceInfo({
+          balanceSats: data.balanceSats,
+          balanceBch: data.balanceBch,
+          txCount: data.txCount,
+          notes: data.notes,
+        });
+      }
+    } catch (e) {
+      setBalanceInfo({
+        error: e instanceof Error ? e.message : "Balance lookup failed",
+      });
+    } finally {
+      setBalanceLoading(false);
+    }
+  }
+
+  function markIntermediateFromExplorer() {
+    if (!selected || !balanceInfo?.balanceSats) return;
+    const updated = advanceState(selected, "INTERMEDIATE_RECEIVED", {
+      intermediateAmount: balanceInfo.balanceBch || balanceInfo.balanceSats,
+      recoveryHint:
+        "Explorer balance is a hint only. Confirm spendable BCH in your wallet before swapping to PUSD.",
+    });
+    setSelected(updated);
+    refresh();
+  }
+
+  function markLeg2ManualComplete() {
+    if (!selected) return;
+    const tx = leg2Txid.trim();
+    if (tx.length < 16) {
+      alert("Paste the BCH/Cauldron txid from your wallet after the PUSD swap.");
+      return;
+    }
+    const legs = selected.legs.map((l, i) =>
+      i === 1 ? { ...l, status: "confirmed" as const, txHash: tx } : l
+    );
+    const updated = advanceState(selected, "COMPLETED", {
+      legs,
+      recoveryHint: undefined,
+      error: undefined,
     });
     setSelected(updated);
     refresh();
@@ -209,7 +280,57 @@ export default function TrackerPage() {
                 ))}
               </div>
 
-              {selected.recoveryHint && (
+              
+              <div className="mt-4 p-3 rounded-lg border border-surface-border space-y-2">
+                <p className="text-xs font-medium text-gray-300">
+                  Verify intermediate BCH (explorer)
+                </p>
+                <button
+                  type="button"
+                  disabled={balanceLoading || !selected.destinationBch}
+                  onClick={() => void verifyBchBalance()}
+                  className="text-xs px-2 py-1 rounded border border-bch/40 text-bch disabled:opacity-40"
+                >
+                  {balanceLoading ? "Checking…" : "Fetch address balance"}
+                </button>
+                {balanceInfo?.error && (
+                  <p className="text-xs text-amber-300">{balanceInfo.error}</p>
+                )}
+                {balanceInfo?.balanceBch && (
+                  <div className="text-xs font-mono text-gray-300 space-y-1">
+                    <p>Balance ≈ {balanceInfo.balanceBch} BCH ({balanceInfo.balanceSats} sats)</p>
+                    <p>Tx count: {balanceInfo.txCount}</p>
+                    <p className="text-gray-500">{balanceInfo.notes}</p>
+                    <button
+                      type="button"
+                      onClick={markIntermediateFromExplorer}
+                      className="text-xs px-2 py-1 rounded border border-surface-border"
+                    >
+                      Mark intermediate received (user-confirmed)
+                    </button>
+                  </div>
+                )}
+                <div className="pt-2 border-t border-surface-border">
+                  <label className="text-[11px] text-gray-500">
+                    Leg 2 Cauldron/Paytaca txid (manual)
+                  </label>
+                  <input
+                    value={leg2Txid}
+                    onChange={(e) => setLeg2Txid(e.target.value.trim())}
+                    placeholder="BCH transaction id after PUSD swap"
+                    className="mt-1 w-full bg-surface border border-surface-border rounded px-2 py-1 text-xs font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={markLeg2ManualComplete}
+                    className="mt-2 text-xs px-2 py-1 rounded border border-bch/40 text-bch"
+                  >
+                    Mark complete after verifying PUSD in wallet
+                  </button>
+                </div>
+              </div>
+
+{selected.recoveryHint && (
                 <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-sm text-amber-200">
                   <strong>Recovery:</strong> {selected.recoveryHint}
                 </div>
