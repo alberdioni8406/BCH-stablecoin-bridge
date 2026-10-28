@@ -28,7 +28,7 @@ export const ASSET_REGISTRY: Record<AssetId, Asset> = {
     network: "bch",
     chainId: "bitcoincash",
     identifier: "b38a33f750f84c5c169a6f23cb873e6e79605021585d4f3408789689ed87f366",
-    decimals: 2, // typical for Moria; confirm via BCMR if available
+    decimals: 2, // confirmed via on-chain BCMR (Riften indexer 2026-10-28)
     officialSource: "https://tokenstork.com/token/b38a33f750f84c5c169a6f23cb873e6e79605021585d4f3408789689ed87f366",
     verificationTimestamp: "2026-10-28T00:00:00Z",
     verificationStatus: "PARTIALLY_VERIFIED",
@@ -145,5 +145,5 @@ export function fromRawAmount(raw: string, decimals: number): string {
   const frac = bi % base;
   if (frac === BigInt(0)) return intPart.toString();
   const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
-  return `\( {intPart}. \){fracStr}`;
+  return `${intPart}.${fracStr}`;
 }
