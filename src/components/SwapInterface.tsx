@@ -15,6 +15,10 @@ export function SwapInterface() {
   const [amount, setAmount] = useState("10");
   const [quote, setQuote] = useState<NormalizedQuote | null>(null);
   const [multiLegNote, setMultiLegNote] = useState<string | null>(null);
+  const [finalAmount, setFinalAmount] = useState<string | null>(null);
+  const [intermediateAmount, setIntermediateAmount] = useState<string | null>(null);
+  const [intermediateAsset, setIntermediateAsset] = useState<string | null>(null);
+  const [leg2Error, setLeg2Error] = useState<string | null>(null);
   const [routeInfo, setRouteInfo] = useState<ReturnType<typeof findRoutes>[0] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -27,6 +31,10 @@ export function SwapInterface() {
     setError(null);
     setQuote(null);
     setMultiLegNote(null);
+    setFinalAmount(null);
+    setIntermediateAmount(null);
+    setIntermediateAsset(null);
+    setLeg2Error(null);
     try {
       const res = await fetch(
         `/api/quote?from=${fromId}&to=${toId}&amount=${encodeURIComponent(amount)}`
@@ -38,9 +46,32 @@ export function SwapInterface() {
       }
       setMode(data.mode);
       setRouteInfo(data.route);
-      if (data.quotes?.[0]) setQuote(data.quotes[0]);
-      if (data.multiLeg && data.notes) setMultiLegNote(data.notes);
-      else setMultiLegNote(null);
+      if (data.multiLeg) {
+        setMultiLegNote(data.notes || "Multi-leg route — not atomic.");
+        setIntermediateAmount(data.intermediateAmount ?? null);
+        setIntermediateAsset(data.intermediateAsset ?? null);
+        setLeg2Error(data.leg2Error ?? null);
+        setFinalAmount(data.finalAmount ?? null);
+        // Display final destination quote when available; never show BCH as final for multi-leg
+        if (data.finalQuote) {
+          setQuote(data.finalQuote);
+        } else if (data.quotes?.[0]) {
+          // leg1 only — do not treat as final
+          setQuote(null);
+          setError(
+            data.leg2Error
+              ? `Second leg unavailable: ${data.leg2Error}. Intermediate estimate: ${data.intermediateAmount ?? "?"} BCH — not the final token amount.`
+              : "Second leg quote unavailable. Intermediate BCH is not the destination amount."
+          );
+        }
+      } else {
+        setMultiLegNote(null);
+        setIntermediateAmount(null);
+        setIntermediateAsset(null);
+        setLeg2Error(null);
+        setFinalAmount(data.finalAmount ?? data.quotes?.[0]?.expectedOutput ?? null);
+        if (data.quotes?.[0]) setQuote(data.quotes[0]);
+      }
       if (data.warning) setError(data.warning);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Network error");
@@ -130,7 +161,7 @@ export function SwapInterface() {
           </div>
           <div className="flex gap-3 items-center">
             <div className="flex-1 text-2xl font-medium text-gray-300">
-              {quote?.expectedOutput ?? "—"}
+              {(finalAmount ?? quote?.expectedOutput) ?? "—"}
             </div>
             <select
               value={toId}
@@ -215,6 +246,26 @@ export function SwapInterface() {
                 {quote.notes}
               </p>
             )}
+          </div>
+        )}
+
+        {(intermediateAmount || leg2Error) && (
+          <div className="mt-3 text-xs rounded-lg border border-surface-border bg-surface-overlay p-3 space-y-1">
+            <div className="flex justify-between text-gray-400">
+              <span>Intermediate (est.)</span>
+              <span className="font-mono text-gray-200">
+                {intermediateAmount ?? "—"} {intermediateAsset === "bch-native" ? "BCH" : intermediateAsset ?? ""}
+              </span>
+            </div>
+            <div className="flex justify-between text-gray-400">
+              <span>Final destination (est.)</span>
+              <span className="font-mono text-bch">
+                {finalAmount ?? "unavailable"} {toAsset.symbol}
+              </span>
+            </div>
+            <p className="text-amber-400/90 pt-1">
+              Non-atomic multi-leg. You may hold intermediate BCH if leg 2 fails.
+            </p>
           </div>
         )}
 
