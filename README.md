@@ -60,13 +60,30 @@ npm run build
 3. Set env vars from `.env.example` (no secrets required for public THOR endpoints)
 4. Deploy
 
+## What works now (honest)
+
+| Capability | Status |
+|------------|--------|
+| Live THORChain quotes (ETH/BSC USDT ↔ BCH) | Yes (`NEXT_PUBLIC_APP_MODE=live`) |
+| THOR swap prep (inbound, router, memo) | Yes — `/api/thor/prepare` |
+| Live Cauldron pool discovery + estimated quotes | Yes — Riften indexer |
+| Multi-leg route matrix + non-atomic tracker | Yes |
+| Cauldron mainnet tx build & broadcast | **Blocked** — needs CashTokens wallet adapter |
+| End-to-end mainnet multi-leg success claim | **Not claimed** |
+
 ## Remaining blockers for full mainnet multi-leg execution
 
-1. Production-grade Cauldron transaction builder + CashTokens wallet adapter (Paytaca / Cashonize / WalletConnect for BCH)
-2. End-to-end monitoring of multi-leg state (source → intermediate BCH → destination)
+1. CashTokens-compatible BCH wallet adapter (Paytaca / Cashonize / WC) + `@mr-zwets/cauldron-swap-sdk` wiring for sign/broadcast
+2. Automated intermediate-balance verification (BCH received after THOR outbound)
 3. Optional Rango API key for alternate EVM↔BCH routing
-4. Independent verification of MUSD decimals / BCMR metadata and current contract status
+4. Independent verification of MUSD decimals / BCMR metadata
 5. BSC USDC exact identity confirmation before enabling
+
+## New API routes
+
+- `GET /api/quote?from=&to=&amount=&leg=` — THOR + Cauldron; multi-leg aware
+- `GET /api/cauldron/pools?token=pusd|musd` — live pool reserves
+- `POST /api/thor/prepare` — `{ from, to, amount, destination }` → deposit params
 
 ## License
 
