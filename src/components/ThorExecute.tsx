@@ -27,7 +27,6 @@ import { getAsset } from "@/lib/assets/registry";
 import {
   createTransferId,
   saveTransfer,
-  advanceState,
   type TransferRecord,
 } from "@/lib/transfer/stateMachine";
 import { Loader2, AlertTriangle, CheckCircle2 } from "lucide-react";
@@ -222,7 +221,6 @@ export function ThorExecute({
         abi: ERC20_ABI,
         functionName: "approve",
         args: [prep.router as `0x${string}`, BigInt(prep.amountNative)],
-        chainId: preferredChain,
       });
     } catch {
       setStep("prepared");
@@ -244,14 +242,13 @@ export function ThorExecute({
           prep.depositArgs.memo,
           BigInt(prep.depositArgs.expiry),
         ],
-        chainId: preferredChain,
       });
-      if (transferId) {
-        const rec = {
+      if (transferId && hash) {
+        const rec: TransferRecord = {
           id: transferId,
           createdAt: Date.now(),
           updatedAt: Date.now(),
-          state: "SOURCE_BROADCAST" as const,
+          state: "SOURCE_BROADCAST",
           from: fromAsset,
           to: toAsset,
           inputAmount: amount,
@@ -259,18 +256,16 @@ export function ThorExecute({
           legs: [
             {
               index: 0,
-              provider: "thorchain" as const,
+              provider: "thorchain",
               from: fromAsset,
-              to: "bch-native" as AssetId,
-              status: "broadcast" as const,
+              to: "bch-native",
+              status: "broadcast",
               txHash: hash,
             },
           ],
-          intermediateAsset: "bch-native" as AssetId,
+          intermediateAsset: "bch-native",
         };
-        advanceState(rec, "SOURCE_BROADCAST", {
-          legs: rec.legs,
-        });
+        saveTransfer(rec);
       }
       setStep("done");
     } catch {
