@@ -8,7 +8,7 @@ import { getAsset } from "@/lib/assets/registry";
 export const EXECUTABLE_EVM_ASSETS: AssetId[] = ["eth-usdt", "bsc-usdt"];
 
 export function isExecutableEvmAsset(id: AssetId): boolean {
-  return EXECUTABLE_EVM_ASSETS.includes(id);
+  return (EXECUTABLE_EVM_ASSETS as string[]).includes(id);
 }
 
 /** Checksummed contract from registry — never hardcode by network alone. */
@@ -26,7 +26,9 @@ export function getEvmTokenAddress(id: AssetId): `0x${string}` {
 export function getEvmChainId(id: AssetId): number {
   const a = getAsset(id);
   if (a.chainId == null) throw new Error(`No chainId for ${id}`);
-  return a.chainId;
+  const n = typeof a.chainId === "number" ? a.chainId : Number(a.chainId);
+  if (!Number.isFinite(n)) throw new Error(`Invalid chainId for ${id}`);
+  return n;
 }
 
 export function getEvmDecimals(id: AssetId): number {
