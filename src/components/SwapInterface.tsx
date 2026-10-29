@@ -6,6 +6,7 @@ import type { AssetId, NormalizedQuote } from "@/lib/types";
 import { findRoutes } from "@/lib/routing/routes";
 import { ArrowDownUp, AlertTriangle, Loader2 } from "lucide-react";
 import { ThorExecute } from "./ThorExecute";
+import { Leg2Cauldron } from "./Leg2Cauldron";
 import clsx from "clsx";
 
 const assets = getEnabledAssets();
@@ -320,6 +321,14 @@ export function SwapInterface() {
             onBchDestinationChange={setBchDestination}
           />
         )}
+
+      {/* Leg 2 guidance when destination is CashToken stable */}
+      {(toId === "pusd" || toId === "musd") && bchDestination && (
+        <Leg2Cauldron
+          toAsset={toId}
+          bchDestination={bchDestination}
+        />
+      )}
 
       {routeInfo && routeInfo.legs.length > 1 && (
         <div className="mt-6 rounded-xl border border-surface-border bg-surface-raised p-4">
