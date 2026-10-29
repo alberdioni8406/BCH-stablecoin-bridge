@@ -1,0 +1,9 @@
+Copy into repo preserving paths. Open /labs/bch-wc after deploy.
+
+Env (optional):
+  NEXT_PUBLIC_BCH_WC=0
+  NEXT_PUBLIC_WC_PROJECT_ID=
+  NEXT_PUBLIC_BCH_NETWORK=chipnet
+  NEXT_PUBLIC_BCH_CAULDRON_BROADCAST=0
+
+Do not set BCH_CAULDRON_BROADCAST=1 until Phase B works on chipnet.
