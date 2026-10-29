@@ -18,7 +18,6 @@ export function toReserveBigInt(value: unknown): bigint {
   if (typeof value === "bigint") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value) || value < 0) return 0n;
-    // Safe only under MAX_SAFE_INTEGER; still prefer string path from API
     if (value > Number.MAX_SAFE_INTEGER) {
       throw new Error("Reserve exceeds JS safe integer — expected string from indexer");
     }
